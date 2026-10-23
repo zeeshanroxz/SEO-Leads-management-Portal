@@ -1,0 +1,36 @@
+import { createRequire } from 'module';
+const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES.replace(/\/?$/, '/') : import.meta.url);
+const { chromium } = require('playwright');
+const out = new URL('../docs/screenshots/', import.meta.url).pathname;
+const base = process.env.BASE_URL || 'http://127.0.0.1:8000';
+const browser = await chromium.launch();
+const label = { admin: 'Admin', finance: 'Finance', auditor: 'Auditor of Project', manager: 'Manager', team_lead: 'Team Lead', agent: 'Agent' };
+async function as(role) { const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); const p = await ctx.newPage(); await p.goto(base + '/login'); await p.locator(`form button:has-text("${label[role]}")`).first().click(); await p.waitForLoadState('networkidle'); return p; }
+const shot = async (p, name, full = false) => { await p.waitForTimeout(350); await p.screenshot({ path: out + name + '.png', fullPage: full }); console.log('saved', name); };
+
+let p = await (async () => { const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } }); const pg = await ctx.newPage(); await pg.goto(base + '/login'); return pg; })();
+await shot(p, '01-login');
+p = await as('admin'); await p.goto(base + '/dashboard', { waitUntil: 'networkidle' }); await shot(p, '02-dashboard-admin', true);
+await p.goto(base + '/leads/L-1011', { waitUntil: 'networkidle' }); await shot(p, '06-lead-detail-pending-admin');
+await p.goto(base + '/admin/forms/FORM-1', { waitUntil: 'networkidle' }); await shot(p, '08-form-builder-admin');
+await p.goto(base + '/admin/visibility', { waitUntil: 'networkidle' }); await shot(p, '16-visibility-overrides-admin');
+await p.goto(base + '/admin/settings', { waitUntil: 'networkidle' }); await shot(p, '17-settings-assumptions-admin');
+p = await as('agent'); await p.goto(base + '/dashboard', { waitUntil: 'networkidle' }); await shot(p, '03-dashboard-agent');
+await p.goto(base + '/leads/create', { waitUntil: 'networkidle' }); await p.selectOption('#project_id', 'P-SEO'); await p.getByRole('button', { name: /^Continue/ }).click();
+await p.fill('#business_name', 'Brightside Dental Group'); await p.fill('#business_email', 'info@brightsidedental.example'); await p.waitForSelector('text=Possible duplicate'); await shot(p, '05-lead-wizard-duplicate-agent');
+await p.goto(base + '/leads/L-1008', { waitUntil: 'networkidle' }); await shot(p, '07-lead-detail-accepted-agent');
+await p.goto(base + '/agreements', { waitUntil: 'networkidle' }); await shot(p, '18-restricted-agent');
+await p.goto(base + '/audits/A-2006', { waitUntil: 'networkidle' }); await shot(p, '10b-audit-request-agent');
+p = await as('manager'); await p.goto(base + '/leads', { waitUntil: 'networkidle' }); await shot(p, '04-leads-list-manager');
+await p.goto(base + '/review-queue', { waitUntil: 'networkidle' }); await p.getByRole('button', { name: /Reject/ }).first().click(); await shot(p, '07b-review-reject-modal-manager');
+await p.goto(base + '/calendar', { waitUntil: 'networkidle' }); await shot(p, '11-calendar-week-manager');
+await p.goto(base + '/revenue', { waitUntil: 'networkidle' }); await shot(p, '15-recurring-revenue-manager');
+p = await as('auditor'); await p.goto(base + '/audits/A-2004', { waitUntil: 'networkidle' }); await shot(p, '09-audit-editor-auditor');
+await p.goto(base + '/audits/A-2001/preview', { waitUntil: 'networkidle' }); await shot(p, '10-audit-client-preview-auditor');
+p = await as('finance'); await p.goto(base + '/finance/handoff', { waitUntil: 'networkidle' }); await shot(p, '12-closed-won-queue-finance');
+await p.goto(base + '/agreements/AG-3001', { waitUntil: 'networkidle' }); await p.getByRole('tab', { name: 'Document' }).click(); await shot(p, '13-agreement-document-finance');
+await p.goto(base + '/finance/billing', { waitUntil: 'networkidle' }); await p.getByRole('tab', { name: /Webhook events/ }).click(); await shot(p, '14-billing-square-webhooks-finance');
+await p.goto(base + '/commissions', { waitUntil: 'networkidle' }); await shot(p, '19-commissions-finance');
+await p.goto(base + '/finance/dashboard', { waitUntil: 'networkidle' }); await shot(p, '20-finance-dashboard');
+await p.goto(base + '/sign/AG-3003', { waitUntil: 'networkidle' }); await p.getByLabel('I have read the full agreement above.').check(); await p.getByRole('button', { name: 'Continue to verification' }).click(); await p.fill('#code', '123456'); await p.getByRole('button', { name: 'Verify' }).click(); await p.getByLabel('Full legal name').fill('Tom Alder'); await shot(p, '13b-customer-signing-demo');
+await browser.close();
