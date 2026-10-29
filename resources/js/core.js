@@ -48,7 +48,7 @@ document.addEventListener('alpine:init', () => {
         },
         set(t) {
             this.tab = t;
-            if (useHash) history.replaceState(null, '', '#' + t);
+            if (useHash) { try { history.replaceState(null, '', '#' + t); } catch (e) { /* sandboxed frames may refuse */ } }
         },
     }));
 
