@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Mock\DemoStore;
+use App\Mock\Record;
 use App\Mock\Repositories\AgreementRepository;
 use App\Mock\Repositories\DirectoryRepository;
 use App\Mock\Repositories\LeadRepository;
@@ -27,7 +28,7 @@ class AgreementController extends Controller
 
         return view('pages.agreements.show', [
             'a' => $a, 'lead' => $a->lead, 'customer' => $a->customer, 'siblings' => $this->agreements->forCustomer($a->customer_id)->where('id', '!=', $a->id)->values(),
-            'canManage' => Demo::can('agreements.manage'), 'dir' => $this->dir, 'signUrl' => route('sign.show', $a->id),
+            'canManage' => Demo::can('agreements.manage'), 'dir' => $this->dir, 'signUrl' => route('sign.show', $a->id), 'editMode' => $this->agreements->editMode($a),
         ]);
     }
 
@@ -35,32 +36,68 @@ class AgreementController extends Controller
     {
         $lead = $this->leads->find($request->query('lead'));
         $pool = $this->leads->closedWon();
-        $services = $this->dir->services()->map(fn ($s) => ['id' => $s->id, 'name' => $s->name, 'billing' => $s->billing, 'price' => $s->sample_price, 'project_id' => $s->project_id, 'clauses' => $s->clause_ids])->values()->all();
 
-        return view('pages.agreements.create', [
-            'lead' => $lead && $lead->sales_status === 'closed_won' ? $lead : null, 'pool' => $pool, 'services' => $services,
-            'clauses' => $this->agreements->clauses()->map(fn ($c) => ['id' => $c->id, 'title' => $c->title, 'scope' => $c->scope, 'version' => $c->version, 'body' => $c->body])->values()->all(),
+        return view('pages.agreements.create', $this->catalogue() + [
+            'lead' => $lead && $lead->sales_status === 'closed_won' ? $lead : null, 'pool' => $pool, 'editing' => null, 'editMode' => null,
             'contacts' => $pool->mapWithKeys(fn ($l) => [$l->id => collect($l->customer->contacts)->map(fn ($k) => ['name' => $k->name, 'email' => $k->email, 'primary' => $k->primary])->values()->all()])->all(),
             'leadServices' => $pool->mapWithKeys(fn ($l) => [$l->id => $l->service_ids])->all(),
             'names' => $pool->mapWithKeys(fn ($l) => [$l->id => $l->customer->business_name])->all(),
         ]);
     }
 
+    public function edit(string $agreement)
+    {
+        $a = $this->agreements->find($agreement);
+        abort_unless($a, 404);
+        $mode = $this->agreements->editMode($a);
+        if (! $mode) {
+            return $this->locked($a);
+        }
+
+        return view('pages.agreements.create', $this->catalogue() + [
+            'lead' => null, 'pool' => collect(), 'contacts' => [], 'leadServices' => [], 'names' => [], 'editing' => $a, 'editMode' => $mode,
+            'editCfg' => [
+                'id' => $a->id, 'mode' => $mode, 'lead_id' => $a->lead_id,
+                'lines' => collect($a->lines)->map(fn ($l) => ['service_id' => $l->service_id, 'price' => $l->price, 'billing' => $l->billing, 'qty' => $l->qty])->values()->all(),
+                'term_months' => $a->term_months, 'start_date' => $a->start_date, 'currency' => $a->currency, 'renewal' => $a->renewal, 'payment_schedule' => $a->payment_schedule,
+                'clause_ids' => collect($a->clauses)->pluck('id')->values()->all(), 'signer_name' => $a->signers[0]->name, 'signer_email' => $a->signers[0]->email,
+            ],
+        ]);
+    }
+
     public function store(Request $request)
     {
-        $data = $request->validate([
-            'lead_id' => 'required|string', 'lines' => 'required|array|min:1', 'lines.*.service_id' => 'required|string', 'lines.*.price' => 'required|numeric|min:0',
-            'lines.*.billing' => ['required', Rule::in(['recurring', 'one_time'])], 'lines.*.qty' => 'nullable|integer|min:1',
-            'term_months' => 'required|integer|min:1|max:60', 'start_date' => 'nullable|date', 'currency' => 'required|string|size:3',
-            'renewal' => 'nullable|string|max:400', 'payment_schedule' => 'nullable|string|max:200', 'clause_ids' => 'nullable|array',
-            'signer_name' => 'required|string|max:120', 'signer_email' => 'required|email|max:160',
-        ], ['lines.required' => 'Add at least one service line.', 'signer_name.required' => 'Name the customer signer.', 'signer_email.required' => 'Add the signer\'s email (used for the one-time code).']);
+        $data = $request->validate(['lead_id' => 'required|string'] + $this->rules(), $this->messages());
         $lead = $this->leads->find($data['lead_id']);
         abort_unless($lead && $lead->sales_status === 'closed_won', 422, 'Agreements are built from Closed Won opportunities.');
         $a = $this->agreements->create($data);
         $this->portal->log('Agreement created', $a->id, null, 'agreement');
 
         return redirect()->route('agreements.show', $a->id)->with('toast', ['message' => 'Draft agreement '.$a->id.' created with a snapshot of the clauses and prices used.']);
+    }
+
+    public function update(Request $request, string $agreement)
+    {
+        $a = $this->agreements->find($agreement);
+        abort_unless($a, 404);
+        $mode = $this->agreements->editMode($a);
+        if (! $mode) {
+            return $this->locked($a);
+        }
+        $data = $request->validate($this->rules() + ['change_note' => 'nullable|string|max:300'], $this->messages());
+        $note = $data['change_note'] ?? null;
+
+        if ($mode === 'in_place') {
+            $this->agreements->update($a->id, $data, $note);
+            $this->portal->log('Agreement edited', $a->id, $note, 'agreement');
+
+            return redirect()->route('agreements.show', $a->id)->with('toast', ['message' => 'Changes saved to '.$a->id.'. Prices and any newly added clauses were re-snapshotted.']);
+        }
+
+        $new = $this->agreements->revise($a->id, $data, $note);
+        $this->portal->log('Agreement revised', $a->id, $note, 'agreement');
+
+        return redirect()->route('agreements.show', $new->id)->with('toast', ['message' => $new->id.' created as v'.$new->version.' with your changes; '.$a->id.' is now Superseded (never overwritten). Send the new version for signature when ready.']);
     }
 
     public function status(Request $request, string $agreement)
@@ -92,8 +129,10 @@ class AgreementController extends Controller
             case 'rejected': $this->agreements->setStatus($a->id, 'rejected', 'Customer rejected. Reason: '.$data['reason']);
                 $msg = 'Marked rejected.';
                 break;
-            case 'revise': $this->agreements->setStatus($a->id, 'superseded', 'Superseded by a new version (v'.($a->version + 1).')');
-                $this->agreements->create(['lead_id' => $a->lead_id, 'lines' => collect($a->lines)->map(fn ($l) => ['service_id' => $l->service_id, 'price' => $l->price, 'billing' => $l->billing, 'qty' => $l->qty])->all(), 'term_months' => $a->term_months, 'start_date' => $a->start_date, 'currency' => $a->currency, 'renewal' => $a->renewal, 'payment_schedule' => $a->payment_schedule, 'clause_ids' => collect($a->clauses)->pluck('id')->all(), 'signer_name' => $a->signers[0]->name, 'signer_email' => $a->signers[0]->email]);
+            case 'revise': $this->agreements->revise($a->id, [
+                'lines' => collect($a->lines)->map(fn ($l) => ['service_id' => $l->service_id, 'price' => $l->price, 'billing' => $l->billing, 'qty' => $l->qty])->all(), 'term_months' => $a->term_months, 'start_date' => $a->start_date,
+                'currency' => $a->currency, 'renewal' => $a->renewal, 'payment_schedule' => $a->payment_schedule, 'clause_ids' => collect($a->clauses)->pluck('id')->all(), 'signer_name' => $a->signers[0]->name, 'signer_email' => $a->signers[0]->email,
+            ]);
                 $msg = 'A new draft was created; the old agreement is marked Superseded (never overwritten).';
                 break;
             case 'reopen_request': $this->agreements->addEvent($a->id, 'Reopen requested - needs Admin approval. Reason: '.$data['reason'], Demo::user()->name);
@@ -132,5 +171,39 @@ class AgreementController extends Controller
         $this->portal->log('Clause updated', $clause, 'New version; existing agreements keep their snapshot', 'agreement');
 
         return back()->with('toast', ['message' => 'Clause saved as a new version. Existing agreements keep the version they were created with.']);
+    }
+
+    /** Shared by create and edit: the services/clauses the builder offers. */
+    private function catalogue(): array
+    {
+        return [
+            'services' => $this->dir->services()->map(fn ($s) => ['id' => $s->id, 'name' => $s->name, 'billing' => $s->billing, 'price' => $s->sample_price, 'project_id' => $s->project_id, 'clauses' => $s->clause_ids])->values()->all(),
+            'clauses' => $this->agreements->clauses()->map(fn ($c) => ['id' => $c->id, 'title' => $c->title, 'scope' => $c->scope, 'version' => $c->version, 'body' => $c->body])->values()->all(),
+        ];
+    }
+
+    private function rules(): array
+    {
+        return [
+            'lines' => 'required|array|min:1', 'lines.*.service_id' => 'required|string', 'lines.*.price' => 'required|numeric|min:0',
+            'lines.*.billing' => ['required', Rule::in(['recurring', 'one_time'])], 'lines.*.qty' => 'nullable|integer|min:1',
+            'term_months' => 'required|integer|min:1|max:60', 'start_date' => 'nullable|date', 'currency' => 'required|string|size:3',
+            'renewal' => 'nullable|string|max:400', 'payment_schedule' => 'nullable|string|max:200', 'clause_ids' => 'nullable|array',
+            'signer_name' => 'required|string|max:120', 'signer_email' => 'required|email|max:160',
+        ];
+    }
+
+    private function messages(): array
+    {
+        return ['lines.required' => 'Add at least one service line.', 'signer_name.required' => 'Name the customer signer.', 'signer_email.required' => 'Add the signer\'s email (used for the one-time code).'];
+    }
+
+    private function locked(Record $a)
+    {
+        $why = $a->status === 'signed'
+            ? 'Signed agreements are locked and cannot be edited. Start a new agreement or amendment instead.'
+            : 'This agreement is '.strtolower(status_label('agreement', $a->status)).' and can no longer be edited.';
+
+        return redirect()->route('agreements.show', $a->id)->with('toast', ['message' => $why, 'type' => 'info']);
     }
 }

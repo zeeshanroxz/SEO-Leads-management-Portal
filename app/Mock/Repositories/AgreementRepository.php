@@ -66,17 +66,120 @@ class AgreementRepository extends MockRepository implements AgreementRepositoryC
 
     public function create(array $d): Record
     {
-        $lead = $this->leads->find($d['lead_id']);
-        $services = collect($d['lines'])->map(fn ($l) => ['service_id' => $l['service_id'], 'name' => $this->dir->service($l['service_id'])->name, 'price' => (float) $l['price'], 'billing' => $l['billing'], 'qty' => (int) ($l['qty'] ?? 1)]);
-        $clauses = collect($d['clause_ids'] ?? [])->map(fn ($cid) => $this->clause($cid))->filter()->map(fn ($c) => ['id' => $c->id, 'title' => $c->title, 'version' => $c->version, 'body' => $c->body])->values()->all();
+        return $this->insert($d);
+    }
+
+    /**
+     * How an agreement may be edited, if at all. Nothing has reached the customer
+     * while it is a draft, so it is edited in place. Once it has been sent the
+     * customer may have seen or signed that exact text, so an edit becomes a new
+     * version and the old one is Superseded (never overwritten). Signed and other
+     * closed agreements are locked.
+     */
+    public function editMode(Record $a): ?string
+    {
+        return match ($a->status) {
+            'draft', 'ready_to_send' => 'in_place',
+            'sent', 'viewed', 'partially_signed' => 'revision',
+            default => null,
+        };
+    }
+
+    /** Edit a not-yet-sent agreement in place. Unchanged clauses keep the version they were snapshotted at. */
+    public function update(string $id, array $d, ?string $note = null): Record
+    {
+        $a = $this->find($id);
+        $before = $a->plain();
+        $fields = $this->fields($d, $before['clauses']);
+        $changes = $this->changes($before, $fields, $d);
+        $signers = $before['signers'];
+        $signers[0]['name'] = $d['signer_name'];
+        $signers[0]['email'] = $d['signer_email'];
+
+        $patch = $fields + ['signers' => $signers];
+        $text = 'Draft edited ('.($changes ? implode(', ', $changes) : 'no field changes').')'.($note ? '. Note: '.$note : '');
+        if ($a->status === 'ready_to_send') {
+            $patch['status'] = 'draft';
+            $text .= ' - returned from Ready to Send to Draft; re-confirm before sending';
+        }
+        DemoStore::patch('agreements', $id, $patch);
+        $this->addEvent($id, $text, Demo::user()->name);
+
+        return $this->find($id);
+    }
+
+    /** Edit an already-sent agreement: a new draft version is created and the old agreement is marked Superseded. */
+    public function revise(string $id, array $d, ?string $note = null): Record
+    {
+        $old = $this->find($id);
+        $before = $old->plain();
+        $d['lead_id'] = $old->lead_id;
+        $changes = $this->changes($before, $this->fields($d, $before['clauses']), $d);
         $now = Carbon::now()->toDateTimeString();
-        $row = DemoStore::create('agreements', [
-            'lead_id' => $lead->id, 'customer_id' => $lead->customer_id, 'status' => 'draft', 'currency' => $d['currency'] ?? 'USD',
-            'lines' => $services->all(), 'mrr' => $services->where('billing', 'recurring')->sum(fn ($l) => $l['price'] * $l['qty']),
-            'one_time_total' => $services->where('billing', 'one_time')->sum(fn ($l) => $l['price'] * $l['qty']),
+        $version = (int) $old->version + 1;
+        $detail = ($changes ? 'Edited: '.implode(', ', $changes) : 'No field changes').($note ? '. Note: '.$note : '');
+
+        $history = $before['versions'];
+        if ($history) {
+            $history[array_key_last($history)]['status'] = 'superseded';
+        }
+        $new = $this->insert($d, $before['clauses'], [
+            'version' => $version, 'supersedes' => $old->id,
+            'versions' => array_merge($history, [['no' => $version, 'status' => 'draft', 'at' => $now, 'note' => 'Revision of '.$old->id.' v'.$old->version.'. '.$detail]]),
+            'events' => [['at' => $now, 'text' => 'Draft created as a revision of '.$old->id.' (v'.$old->version.' to v'.$version.'). '.$detail, 'by' => Demo::user()->name]],
+        ]);
+        DemoStore::patch('agreements', $old->id, ['superseded_by' => $new->id, 'versions' => $history]);
+        $this->setStatus($old->id, 'superseded', 'Superseded by '.$new->id.' (v'.$version.'). '.$detail);
+
+        return $new;
+    }
+
+    /**
+     * Builder input -> the stored agreement fields (priced lines, totals, term, clause snapshots).
+     * Clauses already in $keepClauses keep their snapshotted wording; newly ticked ones snapshot the current version.
+     */
+    private function fields(array $d, array $keepClauses = []): array
+    {
+        $lines = collect($d['lines'])->map(fn ($l) => ['service_id' => $l['service_id'], 'name' => $this->dir->service($l['service_id'])->name, 'price' => (float) $l['price'], 'billing' => $l['billing'], 'qty' => (int) ($l['qty'] ?? 1)]);
+        $kept = collect($keepClauses)->keyBy('id');
+        $snapshot = fn (?Record $c) => $c ? ['id' => $c->id, 'title' => $c->title, 'version' => $c->version, 'body' => $c->body] : null;
+        $clauses = collect($d['clause_ids'] ?? [])->map(fn ($cid) => $kept->get($cid) ?? $snapshot($this->clause($cid)))->filter()->values()->all();
+
+        return [
+            'currency' => $d['currency'] ?? 'USD',
+            'lines' => $lines->all(), 'mrr' => $lines->where('billing', 'recurring')->sum(fn ($l) => $l['price'] * $l['qty']),
+            'one_time_total' => $lines->where('billing', 'one_time')->sum(fn ($l) => $l['price'] * $l['qty']),
             'term_months' => (int) $d['term_months'], 'start_date' => ($d['start_date'] ?? null) ?: null,
             'end_date' => ! empty($d['start_date']) ? Carbon::parse($d['start_date'])->addMonths((int) $d['term_months'])->toDateString() : null,
             'renewal' => $d['renewal'] ?? 'Auto-renews monthly after the initial term unless cancelled with 30 days notice (prototype default).', 'payment_schedule' => $d['payment_schedule'] ?? 'Monthly in advance', 'clauses' => $clauses,
+        ];
+    }
+
+    /** Human-readable list of what an edit changed, for the event log. */
+    private function changes(array $before, array $fields, array $d): array
+    {
+        $lines = fn (array $rows) => collect($rows)->map(fn ($l) => [$l['service_id'], (float) $l['price'], $l['billing'], (int) $l['qty']])->all();
+        $clauseIds = fn (array $rows) => collect($rows)->pluck('id')->sort()->values()->all();
+
+        return array_keys(array_filter([
+            'service lines' => $lines($before['lines']) !== $lines($fields['lines']),
+            'term' => (int) $before['term_months'] !== $fields['term_months'],
+            'start date' => ($before['start_date'] ?: null) !== $fields['start_date'],
+            'currency' => $before['currency'] !== $fields['currency'],
+            'renewal rule' => $before['renewal'] !== $fields['renewal'],
+            'payment schedule' => $before['payment_schedule'] !== $fields['payment_schedule'],
+            'clauses' => $clauseIds($before['clauses']) !== $clauseIds($fields['clauses']),
+            'customer signer' => ($before['signers'][0]['name'] ?? null) !== $d['signer_name'] || ($before['signers'][0]['email'] ?? null) !== $d['signer_email'],
+        ]));
+    }
+
+    /** Create the agreement row. $extra overrides the first-draft defaults (used for revisions). */
+    private function insert(array $d, array $keepClauses = [], array $extra = []): Record
+    {
+        $lead = $this->leads->find($d['lead_id']);
+        $now = Carbon::now()->toDateTimeString();
+        $row = DemoStore::create('agreements', array_merge($this->fields($d, $keepClauses), [
+            'lead_id' => $lead->id, 'customer_id' => $lead->customer_id, 'status' => 'draft',
             'version' => 1, 'versions' => [['no' => 1, 'status' => 'draft', 'at' => $now, 'note' => 'Draft created; clause versions snapshotted']],
             'signers' => [
                 ['name' => $d['signer_name'], 'role' => 'Customer', 'email' => $d['signer_email'], 'signed_at' => null, 'method' => null, 'verification' => 'Pending', 'consent' => false],
@@ -84,7 +187,7 @@ class AgreementRepository extends MockRepository implements AgreementRepositoryC
             ],
             'events' => [['at' => $now, 'text' => 'Draft created', 'by' => Demo::user()->name]],
             'created_by' => Demo::id(), 'created_at' => $now, 'signed_at' => null, 'hash' => null, 'billing_status' => 'not_set_up', 'offline_upload' => null,
-        ], 'AG-', 3100);
+        ], $extra), 'AG-', 3100);
         DemoStore::patch('leads', $lead->id, ['handoff' => ['state' => 'in_progress', 'received_at' => $lead->handoff?->received_at ?? $now, 'assigned_to' => Demo::id()]]);
 
         return $this->find($row['id']);

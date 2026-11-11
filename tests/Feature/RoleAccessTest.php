@@ -14,7 +14,7 @@ class RoleAccessTest extends TestCase
     {
         $paths = ['/dashboard', '/leads', '/leads/create', '/leads/L-1001', '/review-queue', '/customers', '/customers/C-001', '/admin/users', '/admin/forms', '/admin/forms/FORM-1',
             '/admin/projects', '/admin/visibility', '/admin/activity', '/admin/settings', '/audits', '/audits/A-2001', '/audits/A-2001/preview', '/calendar',
-            '/settings/calendar-integrations', '/learning', '/finance/handoff', '/finance/dashboard', '/agreements', '/agreements/AG-3001', '/agreements/create',
+            '/settings/calendar-integrations', '/learning', '/finance/handoff', '/finance/dashboard', '/agreements', '/agreements/AG-3001', '/agreements/AG-3003/edit', '/agreements/create',
             '/finance/billing', '/integrations/square', '/commissions', '/commissions/CM-5001', '/commissions-rules', '/revenue', '/notifications', '/notifications/settings'];
 
         foreach ($paths as $path) {

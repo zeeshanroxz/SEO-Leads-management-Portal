@@ -3,21 +3,23 @@ import Alpine from 'alpinejs';
 document.addEventListener('alpine:init', () => {
     Alpine.data('agreementBuilder', (cfg) => ({
         cfg,
-        lead_id: cfg.lead ?? '',
-        lines: [],
-        term_months: 12,
-        start_date: '',
-        currency: 'USD',
-        renewal: 'Auto-renews monthly after the initial term unless cancelled with 30 days notice (prototype default).',
-        payment_schedule: 'Monthly in advance',
-        clause_ids: [],
-        signer_name: '',
-        signer_email: '',
+        // cfg.editing is set when an existing agreement is being edited (fields are prefilled, the lead is fixed)
+        lead_id: cfg.editing?.lead_id ?? cfg.lead ?? '',
+        lines: (cfg.editing?.lines ?? []).map((l) => ({ ...l })),
+        term_months: cfg.editing?.term_months ?? 12,
+        start_date: cfg.editing?.start_date ?? '',
+        currency: cfg.editing?.currency ?? 'USD',
+        renewal: cfg.editing?.renewal ?? 'Auto-renews monthly after the initial term unless cancelled with 30 days notice (prototype default).',
+        payment_schedule: cfg.editing?.payment_schedule ?? 'Monthly in advance',
+        clause_ids: [...(cfg.editing?.clause_ids ?? [])],
+        signer_name: cfg.editing?.signer_name ?? '',
+        signer_email: cfg.editing?.signer_email ?? '',
+        change_note: '',
         touched: false,
         init() {
             this.$watch('lead_id', () => this.onLead());
             this.$watch('lines', () => this.syncClauses(), { deep: true });
-            if (this.lead_id) this.onLead();
+            if (this.lead_id && !this.cfg.editing) this.onLead();
         },
         onLead() {
             const ids = this.cfg.leadServices[this.lead_id] ?? [];

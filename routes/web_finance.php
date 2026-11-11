@@ -25,6 +25,8 @@ Route::middleware('perm:agreements.view')->group(function () {
 Route::middleware('perm:agreements.manage')->group(function () {
     Route::get('/agreements/create', [AgreementController::class, 'create'])->name('agreements.create');
     Route::post('/agreements', [AgreementController::class, 'store'])->name('agreements.store');
+    Route::get('/agreements/{agreement}/edit', [AgreementController::class, 'edit'])->name('agreements.edit')->where('agreement', 'AG-[0-9]+');
+    Route::put('/agreements/{agreement}', [AgreementController::class, 'update'])->name('agreements.update')->where('agreement', 'AG-[0-9]+');
     Route::post('/agreements/{agreement}/status', [AgreementController::class, 'status'])->name('agreements.status')->where('agreement', 'AG-[0-9]+');
     Route::post('/agreements/{agreement}/offline', [AgreementController::class, 'offline'])->name('agreements.offline')->where('agreement', 'AG-[0-9]+');
     Route::post('/agreements/{agreement}/offline-review', [AgreementController::class, 'offlineReview'])->name('agreements.offline.review')->where('agreement', 'AG-[0-9]+');

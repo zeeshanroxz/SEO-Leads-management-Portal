@@ -30,6 +30,13 @@ interface AgreementRepositoryContract
 
     public function create(array $d): Record;
 
+    /** 'in_place' (not yet sent), 'revision' (sent - edit creates a new version) or null (locked). */
+    public function editMode(Record $a): ?string;
+
+    public function update(string $id, array $d, ?string $note = null): Record;
+
+    public function revise(string $id, array $d, ?string $note = null): Record;
+
     public function setStatus(string $id, string $status, string $eventText): void;
 
     public function addEvent(string $id, string $text, string $by = 'System'): void;
