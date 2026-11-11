@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Mock\Record;
 use App\Mock\Repositories\AgreementRepository;
 use App\Mock\Repositories\FinanceRepository;
 use Carbon\Carbon;
@@ -142,6 +143,22 @@ class FinanceWorkflowTest extends TestCase
         $this->assertSame(12, $repo->find('AG-3001')->term_months);
         $this->assertSame($count, $repo->all()->count());          // no new agreement was created either
         $this->get('/agreements/AG-3001')->assertDontSee('/agreements/AG-3001/edit', false);
+    }
+
+    public function test_edit_is_offered_exactly_when_the_agreement_can_still_be_cancelled(): void
+    {
+        $repo = app(AgreementRepository::class);
+        foreach (config('statuses.agreement.values') as $status => $def) {
+            $terminal = (bool) ($def[2]['terminal'] ?? false);
+            $this->assertSame(! $terminal, $repo->editMode(Record::from(['status' => $status])) !== null, "editMode for $status");
+        }
+
+        // and the rendered page agrees: Edit and Cancel appear together, or not at all
+        foreach (['AG-3001' => false, 'AG-3002' => false, 'AG-3003' => true, 'AG-3004' => false] as $id => $open) {
+            $html = $this->asRole('finance')->get("/agreements/$id")->assertOk()->getContent();
+            $this->assertSame($open, str_contains($html, "/agreements/$id/edit"), "$id edit link");
+            $this->assertSame($open, str_contains($html, "confirm: 'Cancel agreement'"), "$id cancel button");
+        }
     }
 
     public function test_agreement_edit_is_validated_and_finance_only(): void
